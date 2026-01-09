@@ -13,7 +13,6 @@ on:
         required: true
         default: 'all'
 
-
 env:
   TZ: Asia/Shanghai
 
@@ -28,21 +27,24 @@ jobs:
         env:
           MATRIX_TARGET: ${{ github.event.inputs.target }}
         run: |
-          if [ "x${MATRIX_TARGET}" = "x" -o "x${MATRIX_TARGET}" = "xall" ]; then \
-            echo "matrix={\"target\":[\"arm64\", \"x64\", \"mipsel\"]}" >> $GITHUB_OUTPUT; \
-          else \
-            targets=""; \
-            for target in ${MATRIX_TARGET}; do \
-              targets="$targets, \"$target\"";
-            done; \
-            echo "matrix={\"target\":[${targets#, }]}" >> $GITHUB_OUTPUT; \
+          if [ "x${MATRIX_TARGET}" = "x" -o "x${MATRIX_TARGET}" = "xall" ]; then
+            echo "matrix={\"target\":[\"arm64\", \"x64\", \"mipsel\"]}" >> $GITHUB_OUTPUT
+          else
+            targets=""
+            for target in ${MATRIX_TARGET}; do
+              targets="$targets, \"$target\""
+            done
+            echo "matrix={\"target\":[${targets#, }]}" >> $GITHUB_OUTPUT
           fi
+
   build:
     needs: matrix
     runs-on: ubuntu-latest
     name: Build IPKs for ${{ matrix.target }}
     strategy:
+      fail-fast: false
       matrix: ${{fromJson(needs.matrix.outputs.matrix)}}
+
     steps:
       - name: Job Info
         run: |
@@ -63,6 +65,7 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
+          set -euxo pipefail
           sudo swapoff -a || true
           sudo rm -rf /swapfile /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo find /etc/apt/sources.list.d ! -name 'ubuntu.sources' -type f -exec rm -f {} +
@@ -72,21 +75,24 @@ jobs:
           sudo -E apt-get -qq clean
           sudo ln -s /usr/bin/python3 /usr/bin/python3.10 || true
           sudo timedatectl set-timezone "$TZ"
-          # curl -fsSL https://raw.githubusercontent.com/P3TERX/dotfiles/master/.bashrc >> ~/.bashrc
 
       - name: Download SDK
-        run: wget ${SDK_URL}${SDK_NAME}.tar.xz
+        run: |
+          set -euxo pipefail
+          wget -q "${SDK_URL}${SDK_NAME}.tar.xz"
 
       - name: Unpack SDK
         run: |
-          mkdir ~/openwrt-sdk
-          tar -xJf `pwd`/${SDK_NAME}.tar.xz --strip-components=1 -C ~/openwrt-sdk
-          ln -s ${HOME}/openwrt-sdk ${SDK_NAME}
+          set -euxo pipefail
+          mkdir -p ~/openwrt-sdk
+          tar -xJf "$(pwd)/${SDK_NAME}.tar.xz" --strip-components=1 -C ~/openwrt-sdk
+          ln -sf ${HOME}/openwrt-sdk ${SDK_NAME}
 
       - name: Clean Code
         run: |
-          rm -f ${SDK_NAME}/package/linux/modules/*
-          rm -f ${SDK_NAME}/package/kernel/linux/modules/*
+          set -euxo pipefail
+          rm -f ${SDK_NAME}/package/linux/modules/* || true
+          rm -f ${SDK_NAME}/package/kernel/linux/modules/* || true
           grep -lFr '$(call KernelPackage,' ${SDK_NAME}/package/linux | xargs -rn1 sed -i 's/ FILES:=/ XFILES:=/g' || true
           grep -lFr '$(call KernelPackage,' ${SDK_NAME}/package/kernel | xargs -rn1 sed -i 's/ FILES:=/ XFILES:=/g' || true
           find ${SDK_NAME}/target/linux -name 'modules.mk' | xargs -rn1 sed -i 's/ FILES:=/ XFILES:=/g' || true
@@ -95,6 +101,7 @@ jobs:
 
       - name: Write Config
         run: |
+          set -euxo pipefail
           cat <<EOF >${SDK_NAME}/.config
           # CONFIG_SIGNED_PACKAGES is not set
           CONFIG_LUCI_LANG_zh_Hans=y
@@ -103,15 +110,15 @@ jobs:
 
       - name: Load custom feeds
         run: |
+          set -euxo pipefail
           echo "" >> ${SDK_NAME}/feeds.conf
-          echo "src-link apps `pwd`/apps/applications" >> ${SDK_NAME}/feeds.conf
+          echo "src-link apps $(pwd)/apps/applications" >> ${SDK_NAME}/feeds.conf
           cat apps/feeds.conf >> ${SDK_NAME}/feeds.conf
           echo "" >> ${SDK_NAME}/feeds.conf
           echo "Final feeds.conf:"
           cat ${SDK_NAME}/feeds.conf
 
-      - name: 'Restore feeds from cache'
-        id: feeds-cache
+      - name: Restore feeds from cache
         uses: actions/cache@v3
         env:
           CACHE_NAME: 'feeds-cache'
@@ -121,8 +128,7 @@ jobs:
             ~/openwrt-sdk/feeds/luci
           key: ${{ env.CACHE_NAME }}-${{ env.SDK_NAME }}-pl-3
 
-      - name: 'Restore staging from cache'
-        id: staging-cache
+      - name: Restore staging from cache
         uses: actions/cache@v3
         env:
           CACHE_NAME: 'staging-cache'
@@ -132,6 +138,7 @@ jobs:
 
       - name: Update feeds
         run: |
+          set -euxo pipefail
           apps="${{ github.event.inputs.applications }}"
           cd ~/openwrt-sdk
           ./scripts/feeds update -a
@@ -140,10 +147,9 @@ jobs:
           patch -d feeds/luci -p1 -f -N -i ${{ github.workspace }}/apps/.github/workflows/luci.patch
           if [ "$apps" = "all" ]; then
             ./scripts/feeds install -a -p apps -d y
-            for repo in `sed -e 's/src-[^ ]* \([^ ]*\) .*/\1/g' ${{ github.workspace }}/apps/feeds.conf`
-            do
-              echo add all in repo $repo
-              ./scripts/feeds install -a -p $repo -d y
+            for repo in $(sed -e 's/src-[^ ]* \([^ ]*\) .*/\1/g' ${{ github.workspace }}/apps/feeds.conf); do
+              echo "add all in repo $repo"
+              ./scripts/feeds install -a -p "$repo" -d y
             done
           else
             ./scripts/feeds install -d y ${apps}
@@ -152,33 +158,46 @@ jobs:
       - name: Defconfig
         id: defconfig
         run: |
+          set -euxo pipefail
           cd ~/openwrt-sdk
           make defconfig
           sed -i 's/^CONFIG_PACKAGE_\(.*\)=m$/# CONFIG_PACKAGE_\1 is not set/' .config
-          grep '^CONFIG_PACKAGE_' .config
+          grep '^CONFIG_PACKAGE_' .config || true
           echo "status=success" >> $GITHUB_OUTPUT
 
-      - name: 'Restore downloads from cache'
+      # ---- DL CACHE (关键修复：不要用固定 key) ----
+      - name: Restore downloads from cache
         id: dl-cache
         uses: actions/cache@v3
-        env:
-          CACHE_NAME: 'dl-cache'
         with:
           path: ${{ github.workspace }}/.dl
-          key: ${{ env.CACHE_NAME }}
-          
+          key: dl-${{ env.SDK_NAME }}-v4
+          restore-keys: |
+            dl-${{ env.SDK_NAME }}-
+
+      # ---- PRECHECK：打印并清理“已知问题文件”，防止 download.pl 直接因旧文件报错退出 ----
       - name: Preflight dl cache (show & purge suspect file)
         run: |
           set -euxo pipefail
           mkdir -p "${{ github.workspace }}/.dl"
+
+          echo "==== before purge: listing (.dl) ===="
+          ls -lah "${{ github.workspace }}/.dl" | tail -n 200 || true
+
           if [ -f "${{ github.workspace }}/.dl/ddnsto-binary-4.0.1.tar.gz" ]; then
+            echo "==== cached ddnsto-binary-4.0.1.tar.gz info ===="
             ls -lh "${{ github.workspace }}/.dl/ddnsto-binary-4.0.1.tar.gz" || true
             file  "${{ github.workspace }}/.dl/ddnsto-binary-4.0.1.tar.gz" || true
             sha256sum "${{ github.workspace }}/.dl/ddnsto-binary-4.0.1.tar.gz" || true
           fi
+
           rm -f "${{ github.workspace }}/.dl/ddnsto-binary-4.0.1.tar.gz" \
                 "${{ github.workspace }}/.dl/ddnsto-binary-4.0.1.tar.gz".* || true
-          
+
+          echo "==== after purge: listing (.dl) ===="
+          ls -lah "${{ github.workspace }}/.dl" | tail -n 200 || true
+
+      # ---- DOWNLOAD：不让失败中断 job，必须产出 rc，保证后续诊断会跑 ----
       - name: Download sources (verbose + log, never stop job here)
         id: download
         if: steps.defconfig.outputs.status == 'success'
@@ -197,18 +216,25 @@ jobs:
 
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
           echo "download rc=$rc"
-          # 永远 exit 0，让后续 Diagnose 一定能跑
           exit 0
 
-      - name: Diagnose hash mismatch in downloads
+      # ---- DIAGNOSE：always 运行；从日志抽 download.pl + curl 再下载验证 ----
+      - name: Diagnose download failure (hash mismatch / HTTP / content)
         if: always() && steps.defconfig.outputs.status == 'success' && steps.download.outputs.rc != '0'
         shell: bash
         run: |
           set -euxo pipefail
           log=/tmp/openwrt-download.log
+
+          echo "==== Last 200 lines of download log ===="
           tail -n 200 "$log" || true
 
+          # 尝试先定位 hash mismatch 行
           line="$(grep -E 'Hash of the local file .* does not match' "$log" | tail -n 1 || true)"
+          echo "==== Mismatch line ===="
+          echo "$line" || true
+
+          # 兜底：拿最后一次 download.pl 命令
           cmd="$(grep -F 'scripts/download.pl' "$log" | tail -n 1 || true)"
 
           if [ -n "$line" ]; then
@@ -218,72 +244,92 @@ jobs:
             fn="$(echo "$cmd" | awk -F'"' '{print $6}' || true)"
           fi
 
+          echo "==== download.pl cmd (selected) ===="
+          echo "$cmd" || true
+
           url_base="$(echo "$cmd" | awk -F'"' '{print $12}' || true)"
-          echo "cmd=$cmd"
           echo "url=${url_base}${fn}"
 
+          echo "==== dl dir listing (workspace .dl) ===="
+          ls -lah "${{ github.workspace }}/.dl" | tail -n 200 || true
+
+          echo "==== Re-download with curl to verify remote content ===="
           rm -f "/tmp/$fn" /tmp/dl.headers || true
           curl -fL --retry 5 --retry-connrefused --retry-delay 2 \
             -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
             -D /tmp/dl.headers -o "/tmp/$fn" "${url_base}${fn}" || true
+
+          echo "==== HTTP headers ===="
           cat /tmp/dl.headers || true
+
+          echo "==== File info ===="
           ls -lh "/tmp/$fn" || true
           file "/tmp/$fn" || true
           sha256sum "/tmp/$fn" || true
-      
+
+          if echo "$fn" | grep -qE '\.tar\.gz$'; then
+            gzip -t "/tmp/$fn" && echo "gzip OK" || echo "gzip BAD"
+          fi
+
       - name: Fail build if download failed
         if: steps.defconfig.outputs.status == 'success' && steps.download.outputs.rc != '0'
-        run: exit 1
-          
-      - name: ReDownload
-        if: failure() && steps.defconfig.outputs.status == 'success'
         run: |
-          cd ~/openwrt-sdk
-          make -j1 V=s download
+          echo "download failed with rc=${{ steps.download.outputs.rc }}"
+          exit 1
 
-      - name: 'Restore downloads from cache'
-        id: dl-cache
+      # ---- CCache ----
+      - name: Restore ccache from cache
+        id: ccache-cache
         uses: actions/cache@v3
+        env:
+          CACHE_NAME: 'ccache-cache'
         with:
-          path: ${{ github.workspace }}/.dl
-          key: dl-${{ env.SDK_NAME }}-v4
-          restore-keys: |
-            dl-${{ env.SDK_NAME }}-
+          path: ~/openwrt-sdk/.ccache
+          key: ${{ env.CACHE_NAME }}-${{ env.SDK_NAME }}-2
 
+      # ---- BUILD ----
       - name: PreCompile IPKs
+        id: precompile
         if: steps.download.outputs.rc == '0'
         run: |
+          set -euxo pipefail
           cd ~/openwrt-sdk
           make -j4 package/compile
 
-      - name: ReCompile IPKs
+      - name: ReCompile IPKs (verbose)
         id: compile
-        if: failure() && steps.download.outputs.status == 'success'
+        if: failure() && steps.download.outputs.rc == '0'
         run: |
+          set -euxo pipefail
           cd ~/openwrt-sdk
           bash -c 'set -o pipefail ; make -j1 V=s defconfig package/compile 2>&1 | tee /tmp/openwrt-sdk-build.log'
-          echo "status=success" >> $GITHUB_OUTPUT
 
       - name: Last fail log
-        if: failure() && steps.download.outputs.status == 'success'
-        run: tail -n 200 /tmp/openwrt-sdk-build.log && false
-
-      - name: PreUpload - Clean
-        id: preupload
-        if: steps.precompile.outputs.status == 'success' || steps.compile.outputs.status == 'success'
+        if: failure() && steps.download.outputs.rc == '0'
         run: |
+          tail -n 200 /tmp/openwrt-sdk-build.log
+          false
+
+      # ---- UPLOAD ----
+      - name: PreUpload - Clean
+        if: success() && (steps.precompile.outcome == 'success' || steps.compile.outcome == 'success')
+        run: |
+          set -euxo pipefail
           cd ${SDK_NAME}/bin/packages/${SDK_ARCH}
           rm -rf base luci
 
       - name: Upload bin directory
         uses: actions/upload-artifact@main
-        if: steps.precompile.outputs.status == 'success' || steps.compile.outputs.status == 'success'
+        if: success() && (steps.precompile.outcome == 'success' || steps.compile.outcome == 'success')
         with:
           name: ${{ env.SDK_ARCH }}
           path: ${{ env.SDK_NAME }}/bin/packages/${{ env.SDK_ARCH }}
 
       - name: PreCache - Clean
+        if: always()
         run: |
-          git -C "${SDK_NAME}/feeds/luci" reset --hard HEAD^
+          set -euxo pipefail
+          # 注意：如果 feeds/luci 没有新 commit，HEAD^ 可能失败；这里加 || true 保守处理
+          git -C "${SDK_NAME}/feeds/luci" reset --hard HEAD^ || true
           cd ${SDK_NAME}/staging_dir
-          rm -rf packages target-*
+          rm -rf packages target-* || true
