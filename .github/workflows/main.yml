@@ -171,77 +171,69 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p "${{ github.workspace }}/.dl"
-
-          echo "==== before purge: listing ===="
-          ls -lah "${{ github.workspace }}/.dl" | tail -n 200 || true
-
           if [ -f "${{ github.workspace }}/.dl/ddnsto-binary-4.0.1.tar.gz" ]; then
-            echo "==== cached ddnsto-binary-4.0.1.tar.gz info ===="
             ls -lh "${{ github.workspace }}/.dl/ddnsto-binary-4.0.1.tar.gz" || true
             file  "${{ github.workspace }}/.dl/ddnsto-binary-4.0.1.tar.gz" || true
             sha256sum "${{ github.workspace }}/.dl/ddnsto-binary-4.0.1.tar.gz" || true
           fi
-
-          # 关键：确保调用 download.pl 前文件不存在
           rm -f "${{ github.workspace }}/.dl/ddnsto-binary-4.0.1.tar.gz" \
                 "${{ github.workspace }}/.dl/ddnsto-binary-4.0.1.tar.gz".* || true
-
-          echo "==== after purge: listing ===="
-          ls -lah "${{ github.workspace }}/.dl" | tail -n 200 || true
           
-      - name: Download sources (verbose + log)
+      - name: Download sources (verbose + log, never stop job here)
         id: download
         if: steps.defconfig.outputs.status == 'success'
-        continue-on-error: true
+        shell: bash
         run: |
-          set -euxo pipefail
-          [ -d "${{ github.workspace }}/.dl" ] || mkdir -p "${{ github.workspace }}/.dl"
+          set -u
+          mkdir -p "${{ github.workspace }}/.dl"
           cd ~/openwrt-sdk
           rm -rf dl
           ln -s "${{ github.workspace }}/.dl" dl
+
+          set +e
           make -j1 V=s download 2>&1 | tee /tmp/openwrt-download.log
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "download rc=$rc"
+          # 永远 exit 0，让后续 Diagnose 一定能跑
+          exit 0
 
       - name: Diagnose hash mismatch in downloads
-        if: always() && steps.download.outcome == 'failure' && steps.defconfig.outputs.status == 'success'
+        if: always() && steps.defconfig.outputs.status == 'success' && steps.download.outputs.rc != '0'
+        shell: bash
         run: |
           set -euxo pipefail
           log=/tmp/openwrt-download.log
-
-          echo "==== Last 200 lines of download log ===="
           tail -n 200 "$log" || true
 
-          # 从日志里提取 file 和 url_base（你这次日志里能明确提到 dl.istoreos.com）
           line="$(grep -E 'Hash of the local file .* does not match' "$log" | tail -n 1 || true)"
-          echo "==== Mismatch line ===="
-          echo "$line" || true
+          cmd="$(grep -F 'scripts/download.pl' "$log" | tail -n 1 || true)"
 
-          fn="$(echo "$line" | sed -n 's/.*Hash of the local file \([^ ]*\) does not match.*/\1/p')"
-          cmd="$(grep -F 'scripts/download.pl' "$log" | grep -F "\"$fn\"" | tail -n 1 || true)"
-          echo "==== download.pl cmd ===="
-          echo "$cmd" || true
+          if [ -n "$line" ]; then
+            fn="$(echo "$line" | sed -n 's/.*Hash of the local file \([^ ]*\) does not match.*/\1/p')"
+            cmd="$(grep -F 'scripts/download.pl' "$log" | grep -F "\"$fn\"" | tail -n 1 || true)"
+          else
+            fn="$(echo "$cmd" | awk -F'"' '{print $6}' || true)"
+          fi
 
-          url_base="$(echo "$cmd" | sed -n 's/.*"\(https:\/\/[^"]*\/\)".*/\1/p')"
+          url_base="$(echo "$cmd" | awk -F'"' '{print $12}' || true)"
+          echo "cmd=$cmd"
           echo "url=${url_base}${fn}"
 
-          echo "==== dl dir listing (cached workspace dl) ===="
-          ls -lah "${{ github.workspace }}/.dl" | tail -n 200 || true
-
-          echo "==== Re-download with curl to verify remote content ===="
           rm -f "/tmp/$fn" /tmp/dl.headers || true
           curl -fL --retry 5 --retry-connrefused --retry-delay 2 \
             -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
             -D /tmp/dl.headers -o "/tmp/$fn" "${url_base}${fn}" || true
-
-          echo "==== HTTP headers ===="
           cat /tmp/dl.headers || true
-
-          echo "==== File info ===="
           ls -lh "/tmp/$fn" || true
           file "/tmp/$fn" || true
           sha256sum "/tmp/$fn" || true
-
-          # 让 job 最终失败，便于你在 UI 一眼看到失败原因
-          exit 1
+      
+      - name: Fail build if download failed
+        if: steps.defconfig.outputs.status == 'success' && steps.download.outputs.rc != '0'
+        run: exit 1
           
       - name: ReDownload
         if: failure() && steps.defconfig.outputs.status == 'success'
@@ -249,22 +241,20 @@ jobs:
           cd ~/openwrt-sdk
           make -j1 V=s download
 
-      - name: 'Restore ccache from cache'
-        id: ccache-cache
+      - name: 'Restore downloads from cache'
+        id: dl-cache
         uses: actions/cache@v3
-        env:
-          CACHE_NAME: 'ccache-cache'
         with:
-          path: ~/openwrt-sdk/.ccache
-          key: ${{ env.CACHE_NAME }}-${{ env.SDK_NAME }}-2
+          path: ${{ github.workspace }}/.dl
+          key: dl-${{ env.SDK_NAME }}-v4
+          restore-keys: |
+            dl-${{ env.SDK_NAME }}-
 
       - name: PreCompile IPKs
-        id: precompile
-        if: steps.download.outputs.status == 'success'
+        if: steps.download.outputs.rc == '0'
         run: |
           cd ~/openwrt-sdk
           make -j4 package/compile
-          echo "status=success" >> $GITHUB_OUTPUT
 
       - name: ReCompile IPKs
         id: compile
