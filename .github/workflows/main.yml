@@ -166,7 +166,29 @@ jobs:
         with:
           path: ${{ github.workspace }}/.dl
           key: ${{ env.CACHE_NAME }}
+          
+      - name: Preflight dl cache (show & purge suspect file)
+        run: |
+          set -euxo pipefail
+          mkdir -p "${{ github.workspace }}/.dl"
 
+          echo "==== before purge: listing ===="
+          ls -lah "${{ github.workspace }}/.dl" | tail -n 200 || true
+
+          if [ -f "${{ github.workspace }}/.dl/ddnsto-binary-4.0.1.tar.gz" ]; then
+            echo "==== cached ddnsto-binary-4.0.1.tar.gz info ===="
+            ls -lh "${{ github.workspace }}/.dl/ddnsto-binary-4.0.1.tar.gz" || true
+            file  "${{ github.workspace }}/.dl/ddnsto-binary-4.0.1.tar.gz" || true
+            sha256sum "${{ github.workspace }}/.dl/ddnsto-binary-4.0.1.tar.gz" || true
+          fi
+
+          # 关键：确保调用 download.pl 前文件不存在
+          rm -f "${{ github.workspace }}/.dl/ddnsto-binary-4.0.1.tar.gz" \
+                "${{ github.workspace }}/.dl/ddnsto-binary-4.0.1.tar.gz".* || true
+
+          echo "==== after purge: listing ===="
+          ls -lah "${{ github.workspace }}/.dl" | tail -n 200 || true
+          
       - name: Download sources (verbose + log)
         id: download
         if: steps.defconfig.outputs.status == 'success'
